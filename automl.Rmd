@@ -1,0 +1,124 @@
+---
+title: "AutoML Room Occupancy"
+output: html_document
+date: '2022-11-01'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r environment}
+# Load libraries and start local cluster
+library(dplyr)
+library(downloader)
+library(h2o)
+h2o.init()
+
+```
+
+## Download files
+
+```{r get_data}
+
+# Set variables
+url <-
+  "https://archive.ics.uci.edu/ml/machine-learning-databases/00357/occupancy_data.zip"
+zipfile <- "dataset.zip"
+exdir <- "./datainput"
+
+# Extract the file to the system directory in case we wanted to use them on H2O Flow web GUi.
+downloader::download(url, dest = zipfile, mode = "wb")
+unzip (zipfile, exdir = exdir)
+
+ #Merge all zipped files
+files <- list.files(exdir, full.names = TRUE)
+df <- do.call(rbind, lapply(files, data.table::fread)) %>%
+  select(-V1) %>%
+  mutate(Occupancy = as.factor(Occupancy))
+```
+
+```{r data_prep}
+#Minimal feature engineering
+#Extract hour and weekday as factors.
+
+df_feat <- df %>%
+  mutate(isweekend = as.factor(weekdays(date) %in% c("Saturday", "Sunday")),
+         hour = as.factor(format(date, '%H'))) %>%
+  select(-date)
+
+#### Prepare H2OFrames
+
+# table(df_feat[df$date < validation_start]$isweekend)
+# table(df_feat[df$date >= validation_start & df$date < test_start]$isweekend)
+# table(df_feat[df$date >= test_start]$isweekend)
+
+
+#Last 7 days of observations as the test set
+test_start <- max(df$date) - as.difftime(7, unit = "days")
+test <- as.h2o(df_feat[df$date >= test_start], "test")
+
+#Use 4 days of observations as the validation set
+validation_start <- test_start - as.difftime(3, unit = "days")
+validation <-
+  as.h2o(df_feat[df$date >= validation_start &
+                   df$date < test_start], "validation")
+
+#Then use the first days of observations as the training set
+training <- as.h2o(df_feat[df$date < validation_start], "training")
+
+```
+
+```{r automl, echo=FALSE}
+#Identify features and label columns
+y <- "Occupancy"
+x <- setdiff(names(training), y)
+
+aml <- h2o.automl(
+  x = x,
+  y = y,
+  training_frame = training,
+  validation_frame = validation,
+  max_models = 30,
+  nfolds = 0, #turns off cross-validation as we added a validation frame.
+  seed = 42, 
+  max_runtime_secs = 120,
+  project_name = "AutoML_001_RoomOccupancy"
+)
+```
+
+
+```{r}
+#See AutoML leaderboard
+print(aml@leaderboard, n = nrow(aml@leaderboard))
+```
+
+```{r}
+print(aml@leader)
+```
+```{r}
+h2o.explain(aml@leader, validation)
+```
+
+```{r}
+h2o.varimp_plot(aml@leader)
+h2o.varimp_heatmap(aml)
+
+```
+
+```{r}
+# Prediction of test data set
+predict <- h2o.predict(aml@leader, test) %>%
+                         as.data.frame()
+```
+
+```{r}
+h2o.explain(aml@leader, test)
+```
+
+
+```{r}
+# Close h2o connection
+h2o.shutdown(prompt = F)
+```  
+
